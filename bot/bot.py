@@ -33,6 +33,7 @@ from .views import (
     ConfirmView,
     HelpView,
     ManageTeamView,
+    ModmailControlView,
     RosterLookupView,
     TicketControlView,
     TicketView,
@@ -45,6 +46,8 @@ from .views import (
     build_team_embed,
     prompt_confirmation,
     send_transcript,
+    _get_staff_role_name_from_bot,
+    _is_staff_server_staff,
 )
 
 log = logging.getLogger(__name__)
@@ -63,6 +66,7 @@ class LeagueBot(commands.Bot):
         intents.guilds = True
         intents.members = True
         intents.message_content = True
+        intents.dm_messages = True
         super().__init__(command_prefix=commands.when_mentioned, intents=intents, help_command=None)
 
         self.config = config
@@ -73,6 +77,12 @@ class LeagueBot(commands.Bot):
         self.ticket_ai_history: dict[int, list] = {}
         self.ticket_claimed_channels: set[int] = set()
         self._ticket_open_counts: dict[int, int] = {}
+
+        # Modmail tracking
+        # modmail_channels: staff_channel_id -> user_id
+        self.modmail_channels: dict[int, int] = {}
+        # modmail_user_to_channel: user_id -> staff_channel_id
+        self.modmail_user_to_channel: dict[int, int] = {}
 
         self._groq: Optional[AsyncGroq] = None
         if config.groq_api_key:
@@ -108,9 +118,20 @@ class LeagueBot(commands.Bot):
         return isinstance(interaction.user, discord.Member) and self.is_admin(interaction.user)
 
     def in_ticket(self, interaction: discord.Interaction) -> bool:
-        if not interaction.channel or not interaction.channel.category:
+        """True if interaction is in a legacy ticket category OR a modmail channel."""
+        if not interaction.channel:
+            return False
+        # Modmail channel (in staff server)
+        if interaction.channel.id in self.modmail_channels:
+            return True
+        # Legacy category-based tickets
+        if not interaction.channel.category:
             return False
         return interaction.channel.category_id in self.config.ticket_category_ids
+
+    def in_modmail(self, interaction: discord.Interaction) -> bool:
+        """True if interaction is inside a modmail staff channel."""
+        return interaction.channel is not None and interaction.channel.id in self.modmail_channels
 
     def has_player_role(self, member: discord.Member) -> bool:
         role_id = self.config.team_member_role_id
@@ -370,7 +391,7 @@ class LeagueBot(commands.Bot):
                     await self.send_mod_log(guild, "AUTO-UNBAN", discord.Color.green(),
                         user=f"{user} (`{uid}`)", reason="Temporary ban duration expired")
                     try:
-                        dm = discord.Embed(title="You have been unbanned!", color=discord.Color.green())
+                        dm = discord.Embed(title="You have been unbanned!", color=discord.Color.blue())
                         dm.description = (
                             f"Your temporary ban in **{guild.name}** has expired.\n"
                             f"You may rejoin here: discord.gg/pfa"
@@ -430,21 +451,18 @@ class LeagueBot(commands.Bot):
     async def setup_hook(self) -> None:
         await self.add_cog(LeagueCommands(self))
 
-        # Register persistent views here (before on_ready, before cache is ready)
-        # This is the correct place for persistent view registration.
+        # Register persistent views
         self.add_view(TicketView())
         self.add_view(TicketControlView())
         self.add_view(CloseRequestView())
+        self.add_view(ModmailControlView())
 
-        # Re-register AppealActionView for every pending appeal so Accept/Deny
-        # buttons work after restarts. custom_id is appeal_accepted_<uid> /
-        # appeal_denied_<uid>, so we must recreate the view with the exact same uid.
+        # Re-register AppealActionView for pending appeals
         data = load_mod()
         registered_ids: set[int] = set()
         for uid_str, appeal in data.get("appeals", {}).items():
             if appeal.get("status") != "pending":
                 continue
-            # Prefer the stored integer user_id; fall back to the dict key.
             raw_id = appeal.get("user_id") or uid_str
             try:
                 appellant_id = int(raw_id)
@@ -491,6 +509,15 @@ class LeagueBot(commands.Bot):
         if message.author.bot:
             return
 
+        # ── DM relay: user → staff channel ──────────────────────────────────
+        if isinstance(message.channel, discord.DMChannel):
+            await self._relay_dm_to_staff(message)
+            return
+
+        # ── Staff channel relay: staff → user DM ─────────────────────────────
+        # (handled via /reply command instead — plain messages in staff channel
+        #  are NOT auto-relayed to avoid noise from staff discussion)
+
         if isinstance(message.author, discord.Member):
             now = datetime.datetime.utcnow()
             activity_list = self._message_activity[message.author.id]
@@ -498,6 +525,14 @@ class LeagueBot(commands.Bot):
             cutoff = now - timedelta(days=7)
             self._message_activity[message.author.id] = [t for t in activity_list if t >= cutoff]
 
+        # AI support in modmail staff channels (if not claimed)
+        if message.channel.id in self.modmail_channels:
+            if isinstance(message.author, discord.Member):
+                # Staff messages in the channel — don't trigger AI for staff
+                return
+            return
+
+        # Legacy ticket AI support
         if not (message.channel.category and message.channel.category_id in self.config.ticket_category_ids):
             return
         if isinstance(message.author, discord.Member):
@@ -527,12 +562,58 @@ class LeagueBot(commands.Bot):
                 )
                 reply = completion.choices[0].message.content.strip()
                 self.ticket_ai_history[channel_id].append({"role": "assistant", "content": reply})
-                embed = discord.Embed(description=reply, color=discord.Color.purple())
+                embed = discord.Embed(description=reply, color=discord.Color.blue())
                 embed.set_author(name="AI Support Assistant")
                 embed.set_footer(text="AI-generated - Staff will follow up on complex issues.")
                 await message.channel.send(embed=embed)
             except Exception as exc:
                 log.warning("AI response error: %s", exc)
+
+    async def _relay_dm_to_staff(self, message: discord.Message) -> None:
+        """Relay a DM from a user to their open modmail staff channel."""
+        user = message.author
+        channel_id = self.modmail_user_to_channel.get(user.id)
+        if not channel_id:
+            return
+
+        staff_channel = self.get_channel(channel_id)
+        if not isinstance(staff_channel, discord.TextChannel):
+            # Channel gone — clean up
+            self.modmail_user_to_channel.pop(user.id, None)
+            self.modmail_channels.pop(channel_id, None)
+            return
+
+        # Build the relay embed (modmail style)
+        embed = discord.Embed(
+            description=message.content or "*[No text]*",
+            color=discord.Color.blue(),
+        )
+        embed.set_author(name=str(user), icon_url=user.display_avatar.url)
+        embed.set_footer(text=f"User ID: {user.id}")
+
+        files = []
+        for attachment in message.attachments[:4]:
+            try:
+                f = await attachment.to_file()
+                files.append(f)
+            except discord.HTTPException:
+                pass
+
+        try:
+            await staff_channel.send(embed=embed, files=files)
+        except discord.HTTPException:
+            pass
+
+        # Acknowledge receipt to the user
+        try:
+            ack = discord.Embed(
+                description="✅ Message sent to staff.",
+                color=discord.Color.blue(),
+            )
+            ack.set_footer(text="Pro For All Support")
+            await message.channel.send(embed=ack)
+        except discord.Forbidden:
+            pass
 
     async def close(self) -> None:
         if self._web_site:
@@ -627,7 +708,7 @@ class RulePickerView(discord.ui.View):
                 f"Showing rules {start}–{end} of {len(self._all)}.\n"
                 "Pick from the dropdown below."
             ),
-            color=discord.Color.red(),
+            color=discord.Color.blue(),
         )
 
 
@@ -678,20 +759,118 @@ class LeagueCommands(commands.Cog):
         ][:25]
 
     # -------------------------------------------------------------------------
-    #  TICKET COMMANDS
+    #  TICKET / MODMAIL COMMANDS
     # -------------------------------------------------------------------------
 
     @app_commands.command(name="setup", description="Send the ticket panel (Admin only)")
     @app_commands.checks.has_permissions(administrator=True)
     async def setup(self, interaction: discord.Interaction) -> None:
-        embed = discord.Embed(title="Open a Ticket Below!", description=TICKET_PANEL_DESCRIPTION, color=discord.Color.red())
+        embed = discord.Embed(
+            title="Open a Ticket Below!",
+            description=TICKET_PANEL_DESCRIPTION,
+            color=discord.Color.blue(),
+        )
         await interaction.channel.send(embed=embed, view=TicketView())
         await self._send(interaction, "Ticket panel sent!")
 
-    @app_commands.command(name="close", description="Close the current ticket")
+    @app_commands.command(name="reply", description="Reply to a user from their modmail thread (Staff only)")
+    @app_commands.describe(message="The message to send to the user")
+    async def reply(self, interaction: discord.Interaction, message: str) -> None:
+        if not self.bot.in_modmail(interaction):
+            await self._send(interaction, "This command can only be used inside a modmail thread.")
+            return
+
+        if not self.bot.is_staff(interaction) and not _is_staff_server_staff(self.bot, interaction):
+            await self._send(interaction, "Only staff can reply to modmail tickets.")
+            return
+
+        user_id = self.bot.modmail_channels.get(interaction.channel.id)
+        if not user_id:
+            await self._send(interaction, "Could not find the user for this thread.")
+            return
+
+        try:
+            user = await self.bot.fetch_user(user_id)
+        except (discord.NotFound, discord.HTTPException):
+            await self._send(interaction, "User not found — they may have deleted their account.")
+            return
+
+        # Get the staff member's highest relevant role name
+        staff_role_name = _get_staff_role_name_from_bot(self.bot, interaction.guild)
+
+        # Send to user's DMs
+        dm_embed = discord.Embed(
+            description=message,
+            color=discord.Color.blue(),
+        )
+        dm_embed.set_author(
+            name=f"{staff_role_name}",
+            icon_url=interaction.user.display_avatar.url,
+        )
+        dm_embed.set_footer(text="Pro For All Support")
+
+        try:
+            await user.send(embed=dm_embed)
+        except discord.Forbidden:
+            await self._send(interaction, "⚠️ Could not DM this user — they have DMs disabled.")
+            return
+        except discord.HTTPException as exc:
+            await self._send(interaction, f"Failed to send DM: {exc}")
+            return
+
+        # Echo the reply into the staff channel so there's a record
+        echo_embed = discord.Embed(
+            description=message,
+            color=discord.Color.blue(),
+        )
+        echo_embed.set_author(
+            name=f"{interaction.user.display_name} ({staff_role_name})",
+            icon_url=interaction.user.display_avatar.url,
+        )
+        echo_embed.set_footer(text=f"→ Sent to {user} ({user.id})")
+        await interaction.channel.send(embed=echo_embed)
+        await self._send(interaction, "Reply sent!")
+
+    @app_commands.command(name="close", description="Close the current modmail thread or ticket")
     async def close(self, interaction: discord.Interaction, reason: Optional[str] = None) -> None:
+        # Modmail close
+        if self.bot.in_modmail(interaction):
+            if not self.bot.is_staff(interaction) and not _is_staff_server_staff(self.bot, interaction):
+                await self._send(interaction, "Only staff can close modmail threads.")
+                return
+
+            user_id = self.bot.modmail_channels.get(interaction.channel.id)
+            await interaction.response.send_message("Closing modmail thread...", ephemeral=True)
+
+            await send_transcript(self.bot, interaction.channel, interaction.user.name, reason)
+
+            if user_id:
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                    close_embed = discord.Embed(
+                        title="Ticket Closed",
+                        description=(
+                            f"Your modmail ticket has been closed by a **{_get_staff_role_name_from_bot(self.bot, interaction.guild)}**.\n\n"
+                            "If you need further assistance, feel free to open a new ticket."
+                            + (f"\n\n**Reason:** {reason}" if reason else "")
+                        ),
+                        color=discord.Color.blue(),
+                    )
+                    close_embed.set_footer(text="Pro For All Support")
+                    await user.send(embed=close_embed)
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+
+            self.bot.modmail_channels.pop(interaction.channel.id, None)
+            if user_id:
+                self.bot.modmail_user_to_channel.pop(user_id, None)
+            self.bot.ticket_claimed_channels.discard(interaction.channel.id)
+            await interaction.channel.delete(reason=f"Modmail closed by {interaction.user}")
+            return
+
+        # Legacy ticket close
         if not self.bot.in_ticket(interaction):
-            await self._send(interaction, "Only usable inside tickets!")
+            await self._send(interaction, "Only usable inside tickets or modmail threads!")
             return
         self.bot.ticket_claimed_channels.discard(interaction.channel.id)
         await send_transcript(self.bot, interaction.channel, interaction.user.name, reason)
@@ -703,7 +882,7 @@ class LeagueCommands(commands.Cog):
         if not self.bot.in_ticket(interaction):
             await self._send(interaction, "Only usable inside tickets!")
             return
-        embed = discord.Embed(title="Close Request", description=f"{interaction.user.mention} wants to close this ticket.", color=discord.Color.red())
+        embed = discord.Embed(title="Close Request", description=f"{interaction.user.mention} wants to close this ticket.", color=discord.Color.blue())
         if reason:
             embed.add_field(name="Reason", value=reason)
         owner_id = self.bot.ticket_owners.get(interaction.channel.id)
@@ -740,11 +919,11 @@ class LeagueCommands(commands.Cog):
         if not self.bot.in_ticket(interaction):
             await self._send(interaction, "Only usable inside tickets!")
             return
-        if not self.bot.is_staff(interaction):
+        if not self.bot.is_staff(interaction) and not _is_staff_server_staff(self.bot, interaction):
             await self._send(interaction, "Only staff can claim tickets.")
             return
         self.bot.ticket_claimed_channels.add(interaction.channel.id)
-        embed = discord.Embed(title="Ticket Claimed", description=f"Handled by {interaction.user.mention}\nAI support has been paused.", color=discord.Color.green())
+        embed = discord.Embed(title="Ticket Claimed", description=f"Handled by {interaction.user.mention}\nAI support has been paused.", color=discord.Color.blue())
         await interaction.channel.send(embed=embed)
         await self._send(interaction, "Claimed! AI support is now paused for this ticket.")
 
@@ -753,11 +932,11 @@ class LeagueCommands(commands.Cog):
         if not self.bot.in_ticket(interaction):
             await self._send(interaction, "Only usable inside tickets!")
             return
-        if not self.bot.is_staff(interaction):
+        if not self.bot.is_staff(interaction) and not _is_staff_server_staff(self.bot, interaction):
             await self._send(interaction, "Only staff can unclaim tickets.")
             return
         self.bot.ticket_claimed_channels.discard(interaction.channel.id)
-        embed = discord.Embed(title="Ticket Unclaimed", description=f"{interaction.user.mention} unclaimed this ticket.\nAI support has been resumed.", color=discord.Color.orange())
+        embed = discord.Embed(title="Ticket Unclaimed", description=f"{interaction.user.mention} unclaimed this ticket.\nAI support has been resumed.", color=discord.Color.blue())
         await interaction.channel.send(embed=embed)
         await self._send(interaction, "Unclaimed! AI support is now active again.")
 
@@ -791,7 +970,7 @@ class LeagueCommands(commands.Cog):
                 await self._send(interaction, "Could not find that member. Try their **User ID**.")
                 return
             count = self.bot.get_ticket_count(uid)
-            embed = discord.Embed(title="Ticket Stats", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+            embed = discord.Embed(title="Ticket Stats", color=discord.Color.blue(), timestamp=discord.utils.utcnow())
             if avatar:
                 embed.set_thumbnail(url=avatar)
             embed.add_field(name="User", value=name, inline=True)
@@ -804,7 +983,7 @@ class LeagueCommands(commands.Cog):
                 await self._send(interaction, "No ticket data recorded this session.")
                 return
             sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:10]
-            embed = discord.Embed(title="Top Ticket Openers (This Session)", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+            embed = discord.Embed(title="Top Ticket Openers (This Session)", color=discord.Color.blue(), timestamp=discord.utils.utcnow())
             lines = []
             for i, (uid, cnt) in enumerate(sorted_counts, 1):
                 m = interaction.guild.get_member(uid)
@@ -877,10 +1056,10 @@ class LeagueCommands(commands.Cog):
             return
 
         add_record(uid, "unban", reason, str(interaction.user), None)
-        await self.bot.send_mod_log(main_guild, "UNBAN", discord.Color.green(),
+        await self.bot.send_mod_log(main_guild, "UNBAN", discord.Color.blue(),
             user=f"{user} (`{uid}`)", moderator=str(interaction.user), reason=reason)
         try:
-            dm = discord.Embed(title="You have been unbanned!", color=discord.Color.green())
+            dm = discord.Embed(title="You have been unbanned!", color=discord.Color.blue())
             dm.description = f"**Reason:** {reason}\n\nYou may rejoin here: {self.bot.config.appeal_server_invite}"
             await user.send(embed=dm)
         except (discord.NotFound, discord.Forbidden):
@@ -906,7 +1085,7 @@ class LeagueCommands(commands.Cog):
         if not records:
             await self._send(interaction, f"**{name}** has no records.")
             return
-        embed = discord.Embed(title=f"Mod History - {name}", color=discord.Color.orange())
+        embed = discord.Embed(title=f"Mod History - {name}", color=discord.Color.blue())
         for i, r in enumerate(records[-10:], 1):
             dur = f" | Duration: {r['duration']}" if r.get("duration") else ""
             embed.add_field(name=f"#{i} - {r['action'].upper()} ({r['timestamp'][:10]})", value=f"**Reason:** {r['reason']}\n**Mod:** {r['mod']}{dur}", inline=False)
@@ -934,7 +1113,7 @@ class LeagueCommands(commands.Cog):
             return
         data["records"][uid] = []
         save_mod(data)
-        await self.bot.send_mod_log(interaction.guild, "Records Cleared", discord.Color.blurple(), user=display, cleared_by=str(interaction.user))
+        await self.bot.send_mod_log(interaction.guild, "Records Cleared", discord.Color.blue(), user=display, cleared_by=str(interaction.user))
         await self._send(interaction, f"Cleared records for {mention}.")
 
     @app_commands.command(name="note", description="Add a staff note to a user's record")
@@ -971,7 +1150,7 @@ class LeagueCommands(commands.Cog):
         if resolved:
             uid = str(resolved.id)
             infractions, notes = _split(data["records"].get(uid, []))
-            embed = discord.Embed(title=str(resolved), color=resolved.color if resolved.color.value else discord.Color.blurple(), timestamp=discord.utils.utcnow())
+            embed = discord.Embed(title=str(resolved), color=discord.Color.blue(), timestamp=discord.utils.utcnow())
             embed.set_thumbnail(url=resolved.display_avatar.url)
             embed.add_field(name="ID", value=uid, inline=True)
             embed.add_field(name="Created", value=resolved.created_at.strftime("%d %b %Y"), inline=True)
@@ -985,7 +1164,7 @@ class LeagueCommands(commands.Cog):
                 title, avatar, created = str(user), user.display_avatar.url, user.created_at.strftime("%d %b %Y")
             except (discord.NotFound, discord.HTTPException):
                 title, avatar, created = f"User `{uid}`", None, "Unknown"
-            embed = discord.Embed(title=title, color=discord.Color.greyple(), timestamp=discord.utils.utcnow())
+            embed = discord.Embed(title=title, color=discord.Color.blue(), timestamp=discord.utils.utcnow())
             if avatar:
                 embed.set_thumbnail(url=avatar)
             embed.add_field(name="ID", value=uid, inline=True)
@@ -1061,7 +1240,7 @@ class LeagueCommands(commands.Cog):
             await self._send(interaction, "Could not find that member. Try their **User ID**.")
             return
         team = self.bot.team_manager.find_team_for_member(uid)
-        embed = discord.Embed(title="Player Lookup", color=discord.Color.blurple() if not team else discord.Color(int(team.hex_color.lstrip("#"), 16)), timestamp=discord.utils.utcnow())
+        embed = discord.Embed(title="Player Lookup", color=discord.Color.blue() if not team else discord.Color(int(team.hex_color.lstrip("#"), 16)), timestamp=discord.utils.utcnow())
         if avatar:
             embed.set_thumbnail(url=avatar)
         embed.add_field(name="Player", value=display_name, inline=True)
@@ -1465,7 +1644,7 @@ class LeagueCommands(commands.Cog):
             if isinstance(results_channel, discord.TextChannel):
                 type_label = "Top Bracket" if match.match_type == "bracket" else "Seeding"
                 await results_channel.send(f"## PFA Season 4 Match {type_label} — FORFEIT\n# __{match.team_one}__ *v.s* __{match.team_two}__\n## Winner: ||{winner}||  *(by forfeit)*\n**Forfeiting Team:** {forfeiter}\n**Reason:** {reason}")
-        await self.bot.send_mod_log(interaction.guild, "MATCH FORFEIT", discord.Color.orange(), match=f"{match.team_one} vs {match.team_two} (Week {match.week})", forfeiting_team=forfeiter, winner=winner, reason=reason, recorded_by=str(interaction.user))
+        await self.bot.send_mod_log(interaction.guild, "MATCH FORFEIT", discord.Color.blue(), match=f"{match.team_one} vs {match.team_two} (Week {match.week})", forfeiting_team=forfeiter, winner=winner, reason=reason, recorded_by=str(interaction.user))
         staff_pings = " ".join(interaction.guild.get_role(rid).mention for rid in self.bot.config.staff_role_ids if interaction.guild.get_role(rid))
         await channel.send(f"## Forfeit Recorded\n**{forfeiter}** has forfeited this match.\n**Winner:** {winner}\n**Reason:** {reason}\n\n{staff_pings} — please review and close this channel when ready.", view=_MatchCloseView())
         challonge_note = await self.bot._report_challonge(match, forfeit_scores)
@@ -1480,7 +1659,7 @@ class LeagueCommands(commands.Cog):
         if not scheduled:
             await self._send(interaction, "No scheduled matches yet.")
             return
-        embed = discord.Embed(title="Upcoming Match Schedules", color=0x0099FF)
+        embed = discord.Embed(title="Upcoming Match Schedules", color=discord.Color.blue())
         for m in scheduled:
             value = f"**{m.scheduled_time}**"
             if m.scheduled_confirmed:
@@ -1501,7 +1680,7 @@ class LeagueCommands(commands.Cog):
             await self._send(interaction, f"No completed matches found{label}.")
             return
         type_label = type.name if type else "All"
-        embed = discord.Embed(title=f"Official Pro For All Match History — {type_label}", color=0x5865F2)
+        embed = discord.Embed(title=f"Official Pro For All Match History — {type_label}", color=discord.Color.blue())
         for m in completed[-20:]:
             s1 = m.scores.get(m.team_one, 0)
             s2 = m.scores.get(m.team_two, 0)
@@ -1524,7 +1703,7 @@ class LeagueCommands(commands.Cog):
             await self._send(interaction, "That match is already completed or overdue.")
             return
         view = AssignStaffView(bot=self.bot, match=match, guild=interaction.guild)
-        embed = discord.Embed(title=f"Assign Staff — {match.team_one} vs {match.team_two}", description="Use the selector(s) below to assign caster and/or referee.", color=discord.Color.blurple())
+        embed = discord.Embed(title=f"Assign Staff — {match.team_one} vs {match.team_two}", description="Use the selector(s) below to assign caster and/or referee.", color=discord.Color.blue())
         embed.add_field(name="Week", value=str(match.week), inline=True)
         embed.add_field(name="Type", value=match.match_type.capitalize(), inline=True)
         if match.scheduled_time:
@@ -1561,7 +1740,7 @@ class LeagueCommands(commands.Cog):
             f"**{match.team_one}** vs **{match.team_two}**\n"
             f"**Week:** {match.week} | **Type:** {match.match_type.capitalize()}\n"
             f"**Deadline:** <t:{due_ts}:F> (<t:{due_ts}:R>){scheduled_line}"
-        ), color=discord.Color.orange())
+        ), color=discord.Color.blue())
         embed.set_footer(text=f"Reminder sent by {interaction.user} • {guild.name}")
         sent_to: list[str] = []
         failed: list[str] = []
@@ -1605,7 +1784,7 @@ class LeagueCommands(commands.Cog):
         data = load_training()
         data.append({"question": question, "answer": answer, "added_by": str(interaction.user), "added_at": discord.utils.utcnow().isoformat()})
         save_training(data)
-        embed = discord.Embed(title="AI Training Example Added", color=discord.Color.green())
+        embed = discord.Embed(title="AI Training Example Added", color=discord.Color.blue())
         embed.add_field(name="Question", value=question, inline=False)
         embed.add_field(name="Answer", value=answer, inline=False)
         embed.set_footer(text=f"Total training examples: {len(data)}")
@@ -1621,7 +1800,7 @@ class LeagueCommands(commands.Cog):
         if not data:
             await self._send(interaction, "No training examples yet.")
             return
-        embed = discord.Embed(title="AI Training Examples", description=f"Total: **{len(data)}** - showing last 10", color=discord.Color.purple())
+        embed = discord.Embed(title="AI Training Examples", description=f"Total: **{len(data)}** - showing last 10", color=discord.Color.blue())
         for i, ex in enumerate(data[-10:], start=max(1, len(data) - 9)):
             q = ex["question"][:60] + ("..." if len(ex["question"]) > 60 else "")
             a = ex["answer"][:100] + ("..." if len(ex["answer"]) > 100 else "")
@@ -1644,7 +1823,7 @@ class LeagueCommands(commands.Cog):
             return
         removed = data.pop(index - 1)
         save_training(data)
-        embed = discord.Embed(title="Training Example Deleted", color=discord.Color.red())
+        embed = discord.Embed(title="Training Example Deleted", color=discord.Color.blue())
         embed.add_field(name="Removed Question", value=removed["question"], inline=False)
         embed.set_footer(text=f"Remaining: {len(data)}")
         await self._send(interaction, embed=embed)
@@ -1677,7 +1856,7 @@ class LeagueCommands(commands.Cog):
                 max_tokens=512, temperature=0.4,
             )
             reply = completion.choices[0].message.content.strip()
-            embed = discord.Embed(title="AI Test Response", color=discord.Color.purple())
+            embed = discord.Embed(title="AI Test Response", color=discord.Color.blue())
             embed.add_field(name="Question", value=question, inline=False)
             embed.add_field(name="AI Response", value=reply[:1024], inline=False)
             embed.set_footer(text=f"Made By Nick • Training examples: {len(load_training())}")
@@ -1695,7 +1874,7 @@ class LeagueCommands(commands.Cog):
 
     @app_commands.command(name="help", description="View all bot commands")
     async def help_cmd(self, interaction: discord.Interaction) -> None:
-        embed = discord.Embed(title="Bot Help", description="Select a category from the dropdown below.", color=discord.Color.blurple())
+        embed = discord.Embed(title="Bot Help", description="Select a category from the dropdown below.", color=discord.Color.blue())
         for category, data in HELP_CATEGORIES.items():
             embed.add_field(name=category, value=data["description"], inline=False)
         embed.set_footer(text="Use the dropdown to browse commands.")
@@ -1716,7 +1895,7 @@ class LeagueCommands(commands.Cog):
         if minutes: parts.append(f"**{minutes}m**")
         parts.append(f"**{seconds}s**")
         start_ts = int(self.bot._start_time.replace(tzinfo=timezone.utc).timestamp())
-        embed = discord.Embed(title="⏱️ Bot Uptime", color=discord.Color.green())
+        embed = discord.Embed(title="⏱️ Bot Uptime", color=discord.Color.blue())
         embed.add_field(name="Running for", value=" ".join(parts), inline=False)
         embed.add_field(name="Online since", value=f"<t:{start_ts}:F> (<t:{start_ts}:R>)", inline=False)
         embed.add_field(name="Latency", value=f"{round(self.bot.latency * 1000)}ms", inline=True)
@@ -1735,7 +1914,7 @@ class LeagueCommands(commands.Cog):
         delta = datetime.datetime.utcnow() - self.bot._start_time
         total_seconds = int(delta.total_seconds())
         uptime_str = f"{total_seconds // 86400}d {(total_seconds % 86400) // 3600}h"
-        embed = discord.Embed(title=f"{guild.name} — Server Info", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        embed = discord.Embed(title=f"{guild.name} — Server Info", color=discord.Color.blue(), timestamp=discord.utils.utcnow())
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
         embed.add_field(name="Members", value=f"**{guild.member_count}** total\n**{sum(1 for m in guild.members if not m.bot)}** humans", inline=True)
@@ -1777,7 +1956,7 @@ class LeagueCommands(commands.Cog):
             bar_len = round((cnt / max_count) * bar_max)
             bar = "█" * bar_len + "░" * (bar_max - bar_len)
             bars.append(f"`{day_labels[i]:<6}` {bar} **{cnt}**")
-        embed = discord.Embed(title=f"Message Activity — {target.display_name}", description="\n".join(bars), color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        embed = discord.Embed(title=f"Message Activity — {target.display_name}", description="\n".join(bars), color=discord.Color.blue(), timestamp=discord.utils.utcnow())
         embed.set_thumbnail(url=target.display_avatar.url)
         embed.add_field(name="Total (7 days)", value=str(total), inline=True)
         embed.add_field(name="Daily Average", value=f"{daily_avg:.1f}", inline=True)
@@ -1812,7 +1991,7 @@ class LeagueCommands(commands.Cog):
             bar_len = round((count / max_val) * bar_max)
             bar = "█" * bar_len + "░" * (bar_max - bar_len)
             lines.append(f"`{hour:02d}:00 UTC` {bar} **{count}**")
-        embed = discord.Embed(title="Server Peak Activity (Last 7 Days)", color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+        embed = discord.Embed(title="Server Peak Activity (Last 7 Days)", color=discord.Color.blue(), timestamp=discord.utils.utcnow())
         embed.add_field(name="00:00 — 11:00 UTC", value="\n".join(lines[:12]) or "No data", inline=True)
         embed.add_field(name="12:00 — 23:00 UTC", value="\n".join(lines[12:]) or "No data", inline=True)
         top_lines = "\n".join(f"**{i+1}.** `{h:02d}:00 UTC` — **{c}** messages" for i, (h, c) in enumerate(top_hours))
@@ -1932,7 +2111,7 @@ class PunishModal(discord.ui.Modal, title="Confirm Punishment"):
 
         try:
             if action == "warn":
-                dm = discord.Embed(title="You have been warned in Pro For All", color=discord.Color.red())
+                dm = discord.Embed(title="You have been warned in Pro For All", color=discord.Color.blue())
                 dm.add_field(name="Reason", value=reason, inline=False)
                 try:
                     await member.send(embed=dm)
@@ -1944,14 +2123,14 @@ class PunishModal(discord.ui.Modal, title="Confirm Punishment"):
                     return
                 await member.timeout(dur_delta, reason=reason)
                 expiry_ts = int((discord.utils.utcnow() + dur_delta).timestamp())
-                dm = discord.Embed(title="You have been timed out!", color=discord.Color.red())
+                dm = discord.Embed(title="You have been timed out!", color=discord.Color.blue())
                 dm.description = f"**Reason:** {reason}\nExpires: <t:{expiry_ts}:F>."
                 try:
                     await member.send(embed=dm)
                 except discord.Forbidden:
                     pass
             elif action == "kick":
-                dm = discord.Embed(title="You have been kicked!", color=discord.Color.red())
+                dm = discord.Embed(title="You have been kicked!", color=discord.Color.blue())
                 dm.description = f"**Reason:** {reason}"
                 try:
                     await member.send(embed=dm)
@@ -1959,7 +2138,7 @@ class PunishModal(discord.ui.Modal, title="Confirm Punishment"):
                     pass
                 await member.kick(reason=reason)
             elif action == "ban":
-                dm = discord.Embed(title="You have been banned!", color=discord.Color.red())
+                dm = discord.Embed(title="You have been banned!", color=discord.Color.blue())
                 dur_line = "This punishment is **permanent**." if dur_delta is None else f"Expires: <t:{int((discord.utils.utcnow() + dur_delta).timestamp())}:F>."
                 dm.description = f"**Reason:** {reason}\n{dur_line}\n\n**Appeal:** Join [this server]({self.bot.config.appeal_server_invite}) and run `/appeal`."
                 try:
@@ -1975,7 +2154,7 @@ class PunishModal(discord.ui.Modal, title="Confirm Punishment"):
             return
 
         add_record(member.id, action, reason, str(interaction.user), dur_str)
-        await self.bot.send_mod_log(guild, action.upper(), discord.Color.red(),
+        await self.bot.send_mod_log(guild, action.upper(), discord.Color.blue(),
             user=f"{member} (`{member.id}`)", moderator=str(interaction.user), duration=dur_str, reason=reason)
 
         if evidence_url and isinstance(interaction.user, discord.Member):
