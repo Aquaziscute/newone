@@ -1,0 +1,291 @@
+{
+  "records": {
+    "1481329631989727283": [
+      {
+        "action": "timeout",
+        "reason": "Rule 1.3 \u2013 Chat Behavior (3 Day Mute)\nDid @everone and scam",
+        "mod": "ultraplaz56",
+        "duration": "3 days, 0:00:00",
+        "timestamp": "2026-04-10T21:40:19.640936"
+      }
+    ],
+    "1304545769637806165": [
+      {
+        "action": "warn",
+        "reason": "Rule 0.9 \u2013 Politics (Warning)",
+        "mod": "cgt.phee",
+        "duration": "permanent",
+        "timestamp": "2026-04-10T22:14:08.264419"
+      },
+      {
+        "action": "ban",
+        "reason": "Rule 0.1.C \u2013 Racism [C] \u2014 Major Racism - Major racism refers to the most severe and impactful forms of racial discrimination, encompassing acts of violence, explicit threats, and deeply entrenched systemic barriers that inflict profound harm and perpetuate widespread inequality upon entire racial groups. (7 Month Ban)",
+        "mod": "3bf3",
+        "duration": "210 days, 0:00:00",
+        "timestamp": "2026-04-11T02:02:55.200784"
+      }
+    ],
+    "1302099259805405357": [],
+    "1336139494419730434": [
+      {
+        "action": "ban",
+        "reason": "Rule 0.5.A \u2013 NSFW [A] \u2014 Any form of NSFW is bannable. Please refrain from using NSFW and keep the community safe! (Perm Ban)",
+        "mod": "3bf3",
+        "duration": "permanent",
+        "timestamp": "2026-04-11T19:56:25.266014"
+      }
+    ],
+    "1214624496644788296": [
+      {
+        "action": "ban",
+        "reason": "Rule 0.5.A \u2013 NSFW [A] \u2014 Any form of NSFW is bannable. Please refrain from using NSFW and keep the community safe! (Perm Ban)",
+        "mod": "3bf3",
+        "duration": "permanent",
+        "timestamp": "2026-04-12T02:19:31.413682"
+      }
+    ],
+    "1366218899095552000": [
+      {
+        "action": "ban",
+        "reason": "Rule 0.5.A \u2013 NSFW [A] \u2014 Any form of NSFW is bannable. Please refrain from using NSFW and keep the community safe! (6 Month Ban)",
+        "mod": "cgt.phee",
+        "duration": "180 days, 0:00:00",
+        "timestamp": "2026-04-12T15:50:59.647655"
+      },
+      {
+        "action": "ban",
+        "reason": "Rule 0.5.A \u2013 NSFW [A] \u2014 Any form of NSFW is bannable. Please refrain from using NSFW and keep the community safe! (6 Month Ban)",
+        "mod": "cgt.phee",
+        "duration": "180 days, 0:00:00",
+        "timestamp": "2026-04-12T15:51:05.071932"
+      }
+    ],
+    "1360671134928076840": [
+      {
+        "action": "ban",
+        "reason": "Rule 0.6 \u2013 Harassment (5 Month Ban)",
+        "mod": "3bf3",
+        "duration": "150 days, 0:00:00",
+        "timestamp": "2026-04-13T01:29:18.316156"
+      }
+    ],
+    "1475586867977130124": [
+      {
+        "action": "ban",
+        "reason": "Rule 0.1.B \u2013 Racism [B] \u2014 Medium Racism - When someone explicitly states a negative stereotype about a racial group to justify excluding them. For instance, \"We can't hire those people; they're never on time,\" used as a reason not to consider a candidate of a certain race, even if it's not a company-wide rule. (3 Month Ban)",
+        "mod": "3bf3",
+        "duration": "90 days, 0:00:00",
+        "timestamp": "2026-04-13T02:59:02.696534"
+      }
+    ],
+    "1194399417453789226": [
+      {
+        "action": "ban",
+        "reason": "Rule 0.1.C \u2013 Racism [C] \u2014 Major Racism - Major racism refers to the most severe and impactful forms of racial discrimination, encompassing acts of violence, explicit threats, and deeply entrenched systemic barriers that inflict profound harm and perpetuate widespread inequality upon entire racial groups. (7 Month Ban)",
+        "mod": "3bf3",
+        "duration": "210 days, 0:00:00",
+        "timestamp": "2026-04-14T22:37:08.568914"
+      },
+      {
+        "action": "unban",
+        "reason": "No reason provided",
+        "mod": "anchqrs",
+        "duration": null,
+        "timestamp": "2026-04-14T23:07:27.275732"
+      }
+    ],
+    "1040872619739717694": [
+      {
+        "action": "unban",
+        "reason": "No reason provided",
+        "mod": "3bf3",
+        "duration": null,
+        "timestamp": "2026-04-14T23:08:02.878701"
+      },
+      {
+        "action": "ban",
+        "reason": "Rule 0.1.C \u2013 Racism [C] \u2014 Major Racism - Major racism refers to the most severe and impactful forms of racial discrimination, encompassing acts of violence, explicit threats, and deeply entrenched systemic barriers that inflict profound harm and perpetuate widespread inequality upon entire racial groups. (Perm Ban)",
+        "mod": "3bf3",
+        "duration": "permanent",
+        "timestamp": "2026-04-14T23:09:03.694439"
+      },
+      {
+        "action": "unban",
+        "reason": "No reason provided",
+        "mod": "3bf3",
+        "duration": null,
+        "timestamp": "2026-04-14T23:09:19.247444"
+      }
+    ],
+    "1364551833044914320": [
+      {
+        "action": "ban",
+        "reason": "Rule 0.5.A \u2013 NSFW [A] \u2014 Any form of NSFW is bannable. Please refrain from using NSFW and keep the community safe! (6 Month Ban)",
+        "mod": "ultraplaz56",
+        "duration": "180 days, 0:00:00",
+        "timestamp": "2026-04-15T00:04:45.797192"
+      }
+    ],
+    "1276696727323148291": [
+      {
+        "action": "ban",
+        "reason": "Rule 0.5.A \u2013 NSFW [A] \u2014 Any form of NSFW is bannable. Please refrain from using NSFW and keep the community safe! (6 Month Ban)",
+        "mod": "3bf3",
+        "duration": "180 days, 0:00:00",
+        "timestamp": "2026-04-15T01:24:44.540425"
+      }
+    ],
+    "1036149506774929488": [
+      {
+        "action": "unban",
+        "reason": "Appeal accepted",
+        "mod": "3bf3",
+        "duration": null,
+        "timestamp": "2026-04-15T02:36:01.867089"
+      },
+      {
+        "action": "ban",
+        "reason": "Rule 0.1.B \u2013 Racism [B] \u2014 Medium Racism - When someone explicitly states a negative stereotype about a racial group to justify excluding them. For instance, \"We can't hire those people; they're never on time,\" used as a reason not to consider a candidate of a certain race, even if it's not a company-wide rule. (3 Month Ban)",
+        "mod": "3bf3",
+        "duration": "90 days, 0:00:00",
+        "timestamp": "2026-04-15T23:36:42.016524"
+      },
+      {
+        "action": "unban",
+        "reason": "Appeal accepted",
+        "mod": "ultraplaz56",
+        "duration": null,
+        "timestamp": "2026-04-16T00:18:15.708971"
+      },
+      {
+        "action": "ban",
+        "reason": "Rule 0.1.A \u2013 Racism [A] \u2014 Minor Racism - Brief and commonplace daily verbal, behavioral, or environmental indignities, whether intentional or unintentional, that communicate hostile, derogatory, or negative racial slights and insults toward people of color. (Perm Ban)",
+        "mod": "3bf3",
+        "duration": "permanent",
+        "timestamp": "2026-04-16T00:22:38.300335"
+      },
+      {
+        "action": "unban",
+        "reason": "Appeal accepted",
+        "mod": "ultraplaz56",
+        "duration": null,
+        "timestamp": "2026-04-16T01:04:33.057509"
+      }
+    ],
+    "1403926914426470541": [
+      {
+        "action": "ban",
+        "reason": "Rule 0.2.B \u2013 Homophobia / Transphobia [B] \u2014 Transphobia - Using derogatory language (slurs), intentionally misgendering or \"deadnaming\" (using a person's former name without permission), personally targeting trans-gender people, (e.g. \u201cI hate trans-genders\u201d) social exclusion, discrimination in everyday interactions (e.g., in public spaces, services), harassment, and physical violence. (3 Month Ban)",
+        "mod": "3bf3",
+        "duration": "90 days, 0:00:00",
+        "timestamp": "2026-04-15T02:12:48.223001"
+      }
+    ],
+    "1475609590170390750": [
+      {
+        "action": "ban",
+        "reason": "Rule 1.8 \u2013 Alternate Accounts (1 Year Ban)",
+        "mod": "3bf3",
+        "duration": "365 days, 0:00:00",
+        "timestamp": "2026-04-15T02:27:42.259804"
+      }
+    ],
+    "1167967492652666982": [
+      {
+        "action": "unban",
+        "reason": "No reason provided",
+        "mod": "3bf3",
+        "duration": null,
+        "timestamp": "2026-04-17T02:26:30.227910"
+      },
+      {
+        "action": "ban",
+        "reason": "Rule 0.2.A \u2013 Homophobia / Transphobia [A] \u2014 Homophobia - Strong dislike, fear, or even hatred of people who are lesbian, gay, or bisexual (LGB), or anyone they think might be. It's a kind of prejudice against people because of their sexual orientation. (3 Month Ban)",
+        "mod": "3bf3",
+        "duration": "90 days, 0:00:00",
+        "timestamp": "2026-04-17T02:29:25.328445"
+      }
+    ],
+    "1211842203714850837": [
+      {
+        "action": "unban",
+        "reason": "anchqrs pass",
+        "mod": "anchqrs",
+        "duration": null,
+        "timestamp": "2026-04-21T01:16:10.236635"
+      }
+    ]
+  },
+  "appeals": {
+    "1360671134928076840": {
+      "user": "cgt.phee",
+      "user_id": 1360671134928076840,
+      "date_and_reason": "April 12th, harassment",
+      "explanation": "said that to skuk after a scrim we did, he said he didnt care and it was \u201cscrim talk\u201d after i apologized (he was saying the same things during the scrim and poking fun at my personal life) i dont know who got me banned though",
+      "appeal_reason": "i want to be a captain of a team next season and continue being a high staff position for this league, i really enjoyed it",
+      "commitments": "i will control my language and composure",
+      "extra": "None",
+      "submitted_at": "2026-04-13T11:41:23.333778",
+      "status": "denied",
+      "appeal_guild_id": 1477699775406145606,
+      "reviewed_by": "moixa",
+      "reviewed_at": "2026-04-14T12:53:30.809252"
+    },
+    "1364551833044914320": {
+      "user": "cgt.milk",
+      "user_id": 1364551833044914320,
+      "date_and_reason": "April, 14 2025",
+      "explanation": "Forgot",
+      "appeal_reason": "I like this server",
+      "commitments": "I wont send nsfw gif's that someone else sent but didn't get banned",
+      "extra": "I still hate nick",
+      "submitted_at": "2026-04-15T04:59:40.058120",
+      "status": "denied",
+      "appeal_guild_id": 1477699775406145606,
+      "reviewed_by": "monkwehcasts",
+      "reviewed_at": "2026-04-15T22:11:53.693117"
+    },
+    "1040872619739717694": {
+      "user": "coolbeansdude69",
+      "user_id": 1040872619739717694,
+      "date_and_reason": "test",
+      "explanation": "test",
+      "appeal_reason": "test",
+      "commitments": "test",
+      "extra": "None",
+      "submitted_at": "2026-04-16T00:43:58.873734",
+      "status": "accepted",
+      "appeal_guild_id": 1477699775406145606,
+      "reviewed_by": "coolbeansdude69",
+      "reviewed_at": "2026-04-16T00:44:06.316036"
+    },
+    "1036149506774929488": {
+      "user": ".horizontalpatch.",
+      "user_id": 1036149506774929488,
+      "date_and_reason": "test",
+      "explanation": "test",
+      "appeal_reason": "test",
+      "commitments": "test",
+      "extra": "None",
+      "submitted_at": "2026-04-16T01:04:15.920981",
+      "status": "accepted",
+      "appeal_guild_id": 1477699775406145606,
+      "reviewed_by": "ultraplaz56",
+      "reviewed_at": "2026-04-16T01:04:30.260823"
+    },
+    "1167967492652666982": {
+      "user": "cgt.fishy",
+      "user_id": 1167967492652666982,
+      "date_and_reason": "April 15 Litterly every reason",
+      "explanation": "RAGEBAITING nick",
+      "appeal_reason": "I litterly rage baited nick and he said ur getting banned and he said what do u do to a soccer ball btw ur prob reading this nick",
+      "commitments": "Ig I won\u2019t rage bait admins or mods or owners",
+      "extra": "My bad for RAGEBAITING ig",
+      "submitted_at": "2026-04-19T16:42:37.268112",
+      "status": "denied",
+      "appeal_guild_id": 1477699775406145606,
+      "reviewed_by": "monkwehcasts",
+      "reviewed_at": "2026-04-22T12:10:55.610322"
+    }
+  }
+}

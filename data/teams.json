@@ -1,0 +1,17 @@
+{
+  "teams": [
+    {
+      "name": "Sith",
+      "hex_color": "#140000",
+      "role_id": 1496967648796479498,
+      "captain_id": 529306306314502144,
+      "icon_url": "https://cdn.discordapp.com/ephemeral-attachments/1486922808473817219/1496967644002390161/image.jpg?ex=69ebcf42&is=69ea7dc2&hm=79d7af9c9aee7c4b5531216d7104a39860743be74b11c84decfd9a1bf4429b13&",
+      "co_captains": [],
+      "members": [
+        529306306314502144
+      ],
+      "invites": []
+    }
+  ],
+  "roster_locked": false
+}
