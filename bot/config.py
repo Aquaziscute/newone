@@ -77,6 +77,10 @@ class BotConfig:
     ranked_support_category_id: Optional[int]
     management_support_category_id: Optional[int]
 
+    # Optional: category in the staff server where modmail channels are created.
+    # If not set, channels are created at the top level of the staff server.
+    staff_ticket_category_id: Optional[int]
+
     appeal_server_id: Optional[int]
     appeal_server_invite: str
 
@@ -142,6 +146,8 @@ class BotConfig:
             general_support_category_id=_get_int("GENERAL_SUPPORT_CATEGORY_ID"),
             ranked_support_category_id=_get_int("RANKED_SUPPORT_CATEGORY_ID"),
             management_support_category_id=_get_int("MANAGEMENT_SUPPORT_CATEGORY_ID"),
+
+            staff_ticket_category_id=_get_int("STAFF_TICKET_CATEGORY_ID"),
 
             appeal_server_id=_get_int("APPEAL_SERVER_ID"),
             appeal_server_invite=os.getenv("APPEAL_SERVER_INVITE", "https://discord.gg"),
