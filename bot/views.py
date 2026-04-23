@@ -1,4 +1,4 @@
-"""Discord UI components: tickets, appeals, teams, matches, and invites."""
+"""Discord UI components: modmail tickets, appeals, teams, matches, and invites."""
 
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ def build_team_embed(team: Team, guild: discord.Guild) -> discord.Embed:
     return embed
 
 
-# ── Ticket helpers ────────────────────────────────────────────────────────────
+# ── Transcript ────────────────────────────────────────────────────────────────
 
 async def send_transcript(bot: "LeagueBot", channel: discord.TextChannel, closer: str, reason: Optional[str] = None) -> None:
     transcript_channel_id = bot.config.transcript_channel_id
@@ -99,7 +99,7 @@ async def send_transcript(bot: "LeagueBot", channel: discord.TextChannel, closer
     tc = bot.get_channel(transcript_channel_id)
     if not tc:
         return
-    lines = [f"Ticket Transcript: {channel.name}\n{'=' * 50}\n"]
+    lines = [f"Modmail Transcript: {channel.name}\n{'=' * 50}\n"]
     async for msg in channel.history(limit=None, oldest_first=True):
         ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
         lines.append(f"[{ts}] {msg.author}: {msg.content or '[No text]'}")
@@ -110,7 +110,7 @@ async def send_transcript(bot: "LeagueBot", channel: discord.TextChannel, closer
     embed = discord.Embed(
         title=f"Transcript: {channel.name}",
         description=f"Closed by: {closer}\n{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
-        color=discord.Color.red(),
+        color=discord.Color.blue(),
     )
     if reason:
         embed.add_field(name="Reason", value=reason)
@@ -118,7 +118,7 @@ async def send_transcript(bot: "LeagueBot", channel: discord.TextChannel, closer
 
 
 # =============================================================================
-#  TICKET VIEWS
+#  MODMAIL SYSTEM
 # =============================================================================
 
 TICKET_PANEL_DESCRIPTION = (
@@ -133,6 +133,183 @@ TICKET_PANEL_DESCRIPTION = (
     "- Reporting a staff member\n- Questions for management\n- Server issues\n"
 )
 
+TICKET_TYPE_COLORS = {
+    "General Support":    discord.Color.blue(),
+    "Ranked Support":     discord.Color.blue(),
+    "Management Support": discord.Color.blue(),
+}
+
+
+def _get_staff_role_name(bot: "LeagueBot", guild: discord.Guild) -> str:
+    """Return the display name of the first configured staff role found in the guild."""
+    for rid in bot.config.staff_role_ids:
+        role = guild.get_role(rid)
+        if role:
+            return role.name
+    return "Staff Member"
+
+
+async def _create_modmail_channel(
+    bot: "LeagueBot",
+    user: discord.User | discord.Member,
+    ticket_type: str,
+    source_guild: discord.Guild,
+) -> Optional[discord.TextChannel]:
+    """Create a modmail channel in the staff server for this user."""
+    staff_guild_id = bot.config.appeal_server_id
+    if not staff_guild_id:
+        return None
+
+    staff_guild = bot.get_guild(staff_guild_id)
+    if not staff_guild:
+        try:
+            staff_guild = await bot.fetch_guild(staff_guild_id)
+        except (discord.NotFound, discord.Forbidden):
+            return None
+
+    # Resolve category in the staff server (optional)
+    category: Optional[discord.CategoryChannel] = None
+    if bot.config.staff_ticket_category_id:
+        cat = staff_guild.get_channel(bot.config.staff_ticket_category_id)
+        if isinstance(cat, discord.CategoryChannel):
+            category = cat
+
+    # Permissions: staff server staff role + bot can see; everyone else cannot
+    overwrites = {
+        staff_guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        staff_guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, manage_messages=True),
+    }
+    for rid in bot.config.staff_server_staff_role_ids:
+        role = staff_guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    # Also add main-server staff roles if the bot is in the same guild (unlikely but safe)
+    for rid in bot.config.staff_role_ids:
+        role = staff_guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+    safe_name = user.name.lower().replace(" ", "-")[:20]
+    channel_name = f"mail-{safe_name}"
+
+    try:
+        channel = await staff_guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites,
+            topic=f"Modmail | {ticket_type} | {user} ({user.id}) | From: {source_guild.name}",
+            reason=f"Modmail opened by {user}",
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        return None
+
+    return channel
+
+
+# ── Modmail control panel (shown in staff channel) ────────────────────────────
+
+class ModmailControlView(discord.ui.View):
+    """Persistent view shown at the top of every modmail staff channel."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="modmail_close")
+    async def close_ticket(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        from .bot import LeagueBot
+        bot: LeagueBot = interaction.client  # type: ignore[assignment]
+
+        if not bot.is_staff(interaction) and not _is_staff_server_staff(bot, interaction):
+            await interaction.response.send_message("Only staff can close modmail tickets.", ephemeral=True)
+            return
+
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            return
+
+        user_id = bot.modmail_channels.get(channel.id)
+        await interaction.response.send_message("Closing modmail thread...", ephemeral=True)
+
+        await send_transcript(bot, channel, interaction.user.name)
+
+        # DM the user that their ticket was closed
+        if user_id:
+            try:
+                user = await bot.fetch_user(user_id)
+                close_embed = discord.Embed(
+                    title="Ticket Closed",
+                    description=(
+                        f"Your modmail ticket has been closed by a **{_get_staff_role_name_from_bot(bot, interaction.guild)}**.\n\n"
+                        "If you need further assistance, feel free to open a new ticket."
+                    ),
+                    color=discord.Color.blue(),
+                )
+                close_embed.set_footer(text="Pro For All Support")
+                await user.send(embed=close_embed)
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+        bot.modmail_channels.pop(channel.id, None)
+        bot.ticket_claimed_channels.discard(channel.id)
+        await channel.delete(reason=f"Modmail closed by {interaction.user}")
+
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.success, emoji="✋", custom_id="modmail_claim")
+    async def claim_ticket(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        from .bot import LeagueBot
+        bot: LeagueBot = interaction.client  # type: ignore[assignment]
+
+        if not bot.is_staff(interaction) and not _is_staff_server_staff(bot, interaction):
+            await interaction.response.send_message("Only staff can claim tickets.", ephemeral=True)
+            return
+
+        bot.ticket_claimed_channels.add(interaction.channel.id)
+        embed = discord.Embed(
+            title="Ticket Claimed",
+            description=f"This ticket has been claimed by {interaction.user.mention}.\nAI support has been paused.",
+            color=discord.Color.blue(),
+        )
+        await interaction.channel.send(embed=embed)
+        await interaction.response.send_message("You claimed this ticket!", ephemeral=True)
+
+    @discord.ui.button(label="Unclaim", style=discord.ButtonStyle.secondary, emoji="↩️", custom_id="modmail_unclaim")
+    async def unclaim_ticket(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        from .bot import LeagueBot
+        bot: LeagueBot = interaction.client  # type: ignore[assignment]
+
+        if not bot.is_staff(interaction) and not _is_staff_server_staff(bot, interaction):
+            await interaction.response.send_message("Only staff can unclaim tickets.", ephemeral=True)
+            return
+
+        bot.ticket_claimed_channels.discard(interaction.channel.id)
+        embed = discord.Embed(
+            title="Ticket Unclaimed",
+            description=f"{interaction.user.mention} unclaimed this ticket. AI support resumed.",
+            color=discord.Color.blue(),
+        )
+        await interaction.channel.send(embed=embed)
+        await interaction.response.send_message("Unclaimed.", ephemeral=True)
+
+
+def _get_staff_role_name_from_bot(bot: "LeagueBot", guild: Optional[discord.Guild]) -> str:
+    if not guild:
+        return "Staff Member"
+    for rid in list(bot.config.staff_server_staff_role_ids) + list(bot.config.staff_role_ids):
+        role = guild.get_role(rid)
+        if role:
+            return role.name
+    return "Staff Member"
+
+
+def _is_staff_server_staff(bot: "LeagueBot", interaction: discord.Interaction) -> bool:
+    if not isinstance(interaction.user, discord.Member):
+        return False
+    if interaction.user.guild_permissions.administrator:
+        return True
+    user_role_ids = {r.id for r in interaction.user.roles}
+    return bool(user_role_ids & set(bot.config.staff_server_staff_role_ids))
+
+
+# ── Ticket select (main server panel) ────────────────────────────────────────
 
 class TicketSelect(discord.ui.Select):
     def __init__(self) -> None:
@@ -147,14 +324,7 @@ class TicketSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        from .bot import LeagueBot
-        bot: LeagueBot = interaction.client  # type: ignore[assignment]
-        mapping = {
-            "General Support":    bot.config.general_support_category_id,
-            "Ranked Support":     bot.config.ranked_support_category_id,
-            "Management Support": bot.config.management_support_category_id,
-        }
-        await _create_ticket(interaction, self.values[0], mapping.get(self.values[0]))
+        await _open_modmail(interaction, self.values[0])
 
 
 class TicketView(discord.ui.View):
@@ -163,7 +333,10 @@ class TicketView(discord.ui.View):
         self.add_item(TicketSelect())
 
 
+# ── Legacy views kept for persistent button compatibility ─────────────────────
+
 class TicketControlView(discord.ui.View):
+    """Kept for backward-compat with any existing ticket channels; new tickets use ModmailControlView."""
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
@@ -187,7 +360,7 @@ class TicketControlView(discord.ui.View):
         embed = discord.Embed(
             title="Ticket Claimed",
             description=f"Handled by {interaction.user.mention}\nAI support has been paused.",
-            color=discord.Color.green(),
+            color=discord.Color.blue(),
         )
         await interaction.channel.send(embed=embed)
         await interaction.response.send_message("You claimed this ticket! AI support is now paused.", ephemeral=True)
@@ -224,56 +397,114 @@ class CloseRequestView(discord.ui.View):
     async def close_no(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self._check_owner(interaction):
             return
-        embed = discord.Embed(title="Close Request Denied", description=f"{interaction.user.mention} denied the close request.", color=discord.Color.red())
+        embed = discord.Embed(title="Close Request Denied", description=f"{interaction.user.mention} denied the close request.", color=discord.Color.blue())
         await interaction.channel.send(embed=embed)
         await interaction.response.send_message("Close request denied!", ephemeral=True)
 
 
-async def _create_ticket(interaction: discord.Interaction, ticket_type: str, category_id: Optional[int]) -> None:
+# ── Core modmail open function ────────────────────────────────────────────────
+
+async def _open_modmail(interaction: discord.Interaction, ticket_type: str) -> None:
     from .bot import LeagueBot
     bot: LeagueBot = interaction.client  # type: ignore[assignment]
+
     await interaction.response.defer(ephemeral=True)
+
+    user = interaction.user
     guild = interaction.guild
-    category = discord.utils.get(guild.categories, id=category_id) if category_id else None
-    channel_name = f"{ticket_type.lower().replace(' ', '-')}-{interaction.user.name}"
-    staff_role  = guild.get_role(bot.config.staff_role_ids[0]) if bot.config.staff_role_ids else None
-    ranked_role = guild.get_role(bot.config.ranked_role_id) if bot.config.ranked_role_id else None
-    mgmt_role   = guild.get_role(bot.config.management_role_id) if bot.config.management_role_id else None
-    rw = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    no = discord.PermissionOverwrite(read_messages=False)
-    overwrites: dict = {guild.default_role: no, interaction.user: rw, guild.me: rw}
-    if category_id == bot.config.general_support_category_id:
-        for role in (staff_role, ranked_role, mgmt_role):
-            if role: overwrites[role] = rw
-    elif category_id == bot.config.ranked_support_category_id:
-        for role in (ranked_role, mgmt_role):
-            if role: overwrites[role] = rw
-    elif category_id == bot.config.management_support_category_id:
-        if mgmt_role: overwrites[mgmt_role] = rw
-    channel = await guild.create_text_channel(name=channel_name, category=category, overwrites=overwrites)
-    bot.ticket_owners[channel.id] = interaction.user.id
 
-    ticket_count = bot.record_ticket_open(interaction.user.id)
+    # Check if user already has an open modmail
+    if user.id in bot.modmail_user_to_channel:
+        existing_channel_id = bot.modmail_user_to_channel[user.id]
+        existing_channel = bot.get_channel(existing_channel_id)
+        if existing_channel:
+            await interaction.followup.send(
+                "You already have an open ticket! Please wait for staff to respond.",
+                ephemeral=True,
+            )
+            return
+        else:
+            # Channel was deleted externally, clean up
+            bot.modmail_user_to_channel.pop(user.id, None)
+            bot.modmail_channels.pop(existing_channel_id, None)
 
-    age_years = (discord.utils.utcnow() - interaction.user.created_at).days // 365
-    embed = discord.Embed(title=ticket_type, description="Thank you for opening a ticket! Staff will assist you shortly.", color=discord.Color.red())
-    embed.add_field(name="Please provide:", value="-> Evidence if needed\n-> Description of your issue\n-> Username if reporting", inline=False)
-    embed.add_field(name="Please don't:", value="-> Spam ping staff\n-> Disrespect support agents\n-> Waste our time", inline=False)
-    embed.add_field(name="User", value=f"{interaction.user.mention} — account {age_years}y old", inline=False)
-    await channel.send(content=staff_role.mention if staff_role else "", embed=embed, view=TicketControlView())
+    # Create channel in staff server
+    staff_channel = await _create_modmail_channel(bot, user, ticket_type, guild)
+    if not staff_channel:
+        await interaction.followup.send(
+            "Failed to create your ticket. Please contact staff directly.",
+            ephemeral=True,
+        )
+        return
+
+    # Track the modmail
+    bot.modmail_channels[staff_channel.id] = user.id
+    bot.modmail_user_to_channel[user.id] = staff_channel.id
+    bot.ticket_owners[staff_channel.id] = user.id
+
+    ticket_count = bot.record_ticket_open(user.id)
+    age_years = (discord.utils.utcnow() - user.created_at).days // 365
+
+    # ── Opening embed in the staff channel ──
+    open_embed = discord.Embed(
+        title=f"📬 New Modmail — {ticket_type}",
+        color=discord.Color.blue(),
+    )
+    open_embed.set_author(name=str(user), icon_url=user.display_avatar.url)
+    open_embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=True)
+    open_embed.add_field(name="Account Age", value=f"{age_years}y", inline=True)
+    open_embed.add_field(name="Ticket Type", value=ticket_type, inline=True)
+    open_embed.add_field(name="Source Server", value=guild.name, inline=True)
+    open_embed.add_field(name="Tickets This Session", value=str(ticket_count), inline=True)
+    open_embed.set_footer(text=f"User ID: {user.id}")
 
     if ticket_count >= 5:
-        flag_embed = discord.Embed(
-            title="⚠️ Repeat Ticket Opener",
+        open_embed.add_field(
+            name="⚠️ Repeat Opener",
+            value=f"This user has opened **{ticket_count}** tickets this session.",
+            inline=False,
+        )
+
+    # Ping staff server staff role
+    staff_ping = ""
+    staff_guild = staff_channel.guild
+    for rid in bot.config.staff_server_staff_role_ids:
+        role = staff_guild.get_role(rid)
+        if role:
+            staff_ping = role.mention
+            break
+
+    await staff_channel.send(
+        content=staff_ping if staff_ping else None,
+        embed=open_embed,
+        view=ModmailControlView(),
+    )
+
+    # ── DM the user confirming their ticket ──
+    try:
+        dm_embed = discord.Embed(
+            title="✅ Ticket Opened",
             description=(
-                f"{interaction.user.mention} has now opened **{ticket_count}** tickets this session.\n"
-                "Staff may want to monitor this user."
+                f"Your **{ticket_type}** ticket has been opened.\n\n"
+                "A staff member will get back to you shortly. "
+                "You can send messages here and they'll be forwarded to our team."
             ),
+            color=discord.Color.blue(),
+        )
+        dm_embed.set_footer(text="Pro For All Support • Reply here to message staff")
+        await user.send(embed=dm_embed)
+    except discord.Forbidden:
+        # User has DMs closed — note it in the staff channel
+        warn_embed = discord.Embed(
+            description="⚠️ This user has DMs disabled. They will not receive replies via DM.",
             color=discord.Color.yellow(),
         )
-        await channel.send(embed=flag_embed)
+        await staff_channel.send(embed=warn_embed)
 
-    await interaction.followup.send(f"Ticket created: {channel.mention}", ephemeral=True)
+    await interaction.followup.send(
+        f"Your ticket has been opened! Check your DMs for confirmation.",
+        ephemeral=True,
+    )
 
 
 # =============================================================================
@@ -315,7 +546,7 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal"):
             }
             save_mod(data)
 
-            embed = discord.Embed(title="New Ban Appeal", color=discord.Color.yellow())
+            embed = discord.Embed(title="New Ban Appeal", color=discord.Color.blue())
             embed.set_thumbnail(url=interaction.user.display_avatar.url)
             embed.add_field(name="User",                           value=f"{interaction.user} (`{interaction.user.id}`)", inline=False)
             embed.add_field(name="Date of ban & reason",           value=self.date_and_reason.value,   inline=False)
@@ -325,7 +556,6 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal"):
             embed.add_field(name="Additional comments",            value=self.extra.value or "None",    inline=False)
             embed.set_footer(text="Accept or Deny.")
 
-            # ── Post to staff appeal channel with thread ──────────────────────
             if bot.config.staff_appeal_channel_id:
                 staff_ch = bot.get_channel(bot.config.staff_appeal_channel_id)
                 if not staff_ch:
@@ -339,7 +569,7 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal"):
                         try:
                             await appeal_msg.create_thread(
                                 name=f"Appeal – {interaction.user.name}",
-                                auto_archive_duration=10080,  # 7 days
+                                auto_archive_duration=10080,
                             )
                         except discord.HTTPException:
                             pass
@@ -369,14 +599,11 @@ class _AppealButton(discord.ui.Button):
             return
 
         user_role_ids = {r.id for r in interaction.user.roles}
-
-        # Roles allowed from the main server config
         allowed_role_ids = (
-    set(bot.config.staff_role_ids)
-    | set(bot.config.admin_role_ids)
-    | set(bot.config.staff_server_staff_role_ids)
-)
-
+            set(bot.config.staff_role_ids)
+            | set(bot.config.admin_role_ids)
+            | set(bot.config.staff_server_staff_role_ids)
+        )
         is_permitted = (
             interaction.user.guild_permissions.administrator
             or bool(user_role_ids & allowed_role_ids)
@@ -402,7 +629,7 @@ class _AppealButton(discord.ui.Button):
         new_embed = interaction.message.embeds[0]
 
         if self.action == "accepted":
-            new_embed.color = discord.Color.green()
+            new_embed.color = discord.Color.blue()
             new_embed.set_footer(text=f"Accepted by {interaction.user} - {now.strftime('%Y-%m-%d %H:%M')} UTC")
             await interaction.message.edit(embed=new_embed, view=self.view)
 
@@ -427,7 +654,7 @@ class _AppealButton(discord.ui.Button):
                     dm = discord.Embed(
                         title="Appeal Accepted",
                         description="Your appeal has been **accepted**.\n\nYou may rejoin here: discord.gg/pfa",
-                        color=discord.Color.green(),
+                        color=discord.Color.blue(),
                     )
                     await user.send(embed=dm)
                 except (discord.NotFound, discord.Forbidden):
@@ -451,13 +678,13 @@ class _AppealButton(discord.ui.Button):
             )
 
         else:
-            new_embed.color = discord.Color.red()
+            new_embed.color = discord.Color.blue()
             new_embed.set_footer(text=f"Denied by {interaction.user} - {now.strftime('%Y-%m-%d %H:%M')} UTC")
             await interaction.message.edit(embed=new_embed, view=self.view)
             next_ts = int((now + datetime.timedelta(days=90)).replace(tzinfo=timezone.utc).timestamp())
             try:
                 user = await bot.fetch_user(self.appellant_id)
-                dm = discord.Embed(title="Appeal Declined", description="Your appeal has been declined.", color=discord.Color.red())
+                dm = discord.Embed(title="Appeal Declined", description="Your appeal has been declined.", color=discord.Color.blue())
                 dm.add_field(name="Next Allowed Appeal", value=f"<t:{next_ts}:F>", inline=False)
                 await user.send(embed=dm)
             except (discord.NotFound, discord.Forbidden):
@@ -532,7 +759,6 @@ class InviteDecisionView(discord.ui.View):
             return
 
         notes: List[str] = []
-
         team_role   = guild.get_role(team.role_id)
         member_role = guild.get_role(self.member_role_id) if self.member_role_id else None
 
@@ -610,8 +836,6 @@ class MemberSelect(discord.ui.Select):
         for uid in team.members:
             m = guild.get_member(uid)
             label = m.display_name if m else f"Member {uid}"
-            if uid == team.captain_id: label = f"{label}"
-            elif uid in team.co_captains: label = f"{label}"
             options.append(discord.SelectOption(label=label, value=str(uid)))
         super().__init__(placeholder="Select a member", options=options)
         self._on_select = on_select
@@ -652,34 +876,34 @@ class ManageTeamView(discord.ui.View):
         if self.member_select.options: self.add_item(self.member_select)
 
         self.invite_button = discord.ui.Button(label="Invite", style=discord.ButtonStyle.green)
-        self.invite_button.callback = self._on_invite  # type: ignore[assignment]
+        self.invite_button.callback = self._on_invite
         self.add_item(self.invite_button)
 
         self.cancel_invite_button = discord.ui.Button(label="Cancel Invite", style=discord.ButtonStyle.secondary)
-        self.cancel_invite_button.callback = self._on_cancel_invite  # type: ignore[assignment]
+        self.cancel_invite_button.callback = self._on_cancel_invite
         self.add_item(self.cancel_invite_button)
 
         if allow_force_add:
             self.force_add_button = discord.ui.Button(label="Add Player", style=discord.ButtonStyle.primary)
-            self.force_add_button.callback = self._on_force_add  # type: ignore[assignment]
+            self.force_add_button.callback = self._on_force_add
             self.add_item(self.force_add_button)
 
         self.disband_button = discord.ui.Button(label="Disband", style=discord.ButtonStyle.danger)
-        self.disband_button.callback = self._on_disband  # type: ignore[assignment]
+        self.disband_button.callback = self._on_disband
         self.disband_button.disabled = not self.is_captain_or_admin
         self.add_item(self.disband_button)
 
         self.transfer_button = discord.ui.Button(label="Transfer Captain", style=discord.ButtonStyle.blurple)
-        self.transfer_button.callback = self._on_transfer  # type: ignore[assignment]
+        self.transfer_button.callback = self._on_transfer
         self.transfer_button.disabled = not self.is_captain_or_admin
         self.add_item(self.transfer_button)
 
         self.kick_button = discord.ui.Button(label="Kick Member", style=discord.ButtonStyle.danger, disabled=True)
-        self.kick_button.callback = self._on_kick  # type: ignore[assignment]
+        self.kick_button.callback = self._on_kick
         self.add_item(self.kick_button)
 
         self.promote_button = discord.ui.Button(label="Promote to Co-Captain", style=discord.ButtonStyle.primary, disabled=True)
-        self.promote_button.callback = self._on_promote  # type: ignore[assignment]
+        self.promote_button.callback = self._on_promote
         self.add_item(self.promote_button)
 
         self._update_roster_actions()
@@ -703,8 +927,6 @@ class ManageTeamView(discord.ui.View):
         for uid in self.team.members:
             m = self.guild.get_member(uid)
             label = m.display_name if m else f"Member {uid}"
-            if uid == self.team.captain_id: label = f"{label}"
-            elif uid in self.team.co_captains: label = f"{label}"
             options.append(discord.SelectOption(label=label, value=str(uid)))
         if options: self.member_select.options = options
         elif self.member_select in self.children: self.remove_item(self.member_select)
@@ -747,9 +969,7 @@ class ManageTeamView(discord.ui.View):
             existing = self.manager.find_team_for_member(member.id)
             if existing and existing.name != self.team.name:
                 await select_interaction.response.send_message(
-                    f"{member.mention} is already on **{existing.name}**. They must leave that team first.",
-                    ephemeral=True,
-                )
+                    f"{member.mention} is already on **{existing.name}**. They must leave that team first.", ephemeral=True)
                 return
             self.manager.add_invite(self.team, member.id)
             inviter = self.guild.get_member(self.interaction.user.id) or self.interaction.user
@@ -812,11 +1032,7 @@ class ManageTeamView(discord.ui.View):
             existing = self.manager.find_team_for_member(member.id)
             if existing and existing.name != self.team.name:
                 await select_interaction.response.send_message(
-                    f"{member.mention} is already on **{existing.name}**. "
-                    f"Remove them from that team first before force-adding.",
-                    ephemeral=True,
-                )
-                return
+                    f"{member.mention} is already on **{existing.name}**. Remove them first.", ephemeral=True); return
             try: self.manager.add_member(self.team, member.id)
             except ValueError as exc: await select_interaction.response.send_message(str(exc), ephemeral=True); return
             notes: List[str] = []
@@ -867,13 +1083,13 @@ class ManageTeamView(discord.ui.View):
     async def _on_transfer(self, interaction: discord.Interaction) -> None:
         if not self.is_captain_or_admin:
             await _reply(interaction, "Only the captain or an admin can transfer captaincy."); return
-        options = [
-            discord.SelectOption(
-                label=(self.guild.get_member(uid) or uid).display_name if hasattr(self.guild.get_member(uid), "display_name") else str(uid),
-                value=str(uid),
-            )
-            for uid in self.team.members if uid != self.team.captain_id
-        ]
+        options = []
+        for uid in self.team.members:
+            if uid == self.team.captain_id:
+                continue
+            m = self.guild.get_member(uid)
+            label = m.display_name if m else str(uid)
+            options.append(discord.SelectOption(label=label, value=str(uid)))
         if not options: await _reply(interaction, "No eligible members to transfer to."); return
         select = discord.ui.Select(placeholder="Select new captain", options=options)
 
@@ -898,12 +1114,9 @@ class ManageTeamView(discord.ui.View):
             await inter.response.send_message(response, ephemeral=True)
             await self._redraw()
             if old_cap_id != new_cap_id:
-                await self.bot.log_event(
-                    self.guild,
-                    f"**{member.mention}** is now the captain of **{self.team.name}**",
-                )
+                await self.bot.log_event(self.guild, f"**{member.mention}** is now the captain of **{self.team.name}**")
 
-        select.callback = callback  # type: ignore[assignment]
+        select.callback = callback
         view = discord.ui.View()
         view.add_item(select)
         await interaction.response.send_message("Choose the new captain:", view=view, ephemeral=True)
@@ -933,8 +1146,7 @@ class ManageTeamView(discord.ui.View):
         kicked_mention = member.mention if member else f"<@{kicked_id}>"
         await self.bot.log_event(
             self.guild,
-            f"Roster Kick - {kicked_mention} was removed from **{self.team.name}** "
-            f"by {interaction.user.mention}",
+            f"Roster Kick - {kicked_mention} was removed from **{self.team.name}** by {interaction.user.mention}",
         )
 
     async def _on_promote(self, interaction: discord.Interaction) -> None:
@@ -977,7 +1189,7 @@ class RosterLookupView(discord.ui.View):
         options = [discord.SelectOption(label=t.name, value=t.name.lower(), description=f"{len(t.members)} member(s)") for t in sorted_teams[:25]]
         if options: options[0].default = True
         select = discord.ui.Select(placeholder="Select a team to view", options=options)
-        select.callback = self._on_select  # type: ignore[assignment]
+        select.callback = self._on_select
         self.add_item(select)
         self._select = select
 
@@ -1070,10 +1282,11 @@ class ConfirmTimeView(discord.ui.View):
 HELP_CATEGORIES = {
     "Ticket Commands": {
         "description": "Commands for managing support tickets.",
-        "color": discord.Color.red(),
+        "color": discord.Color.blue(),
         "fields": [
             ("/setup",        "Send the ticket panel in this channel. *(Admin only)*"),
-            ("/close",        "Close the current ticket and save a transcript."),
+            ("/close",        "Close the current modmail thread."),
+            ("/reply",        "Reply to the user from the modmail thread. *(Staff only)*"),
             ("/closerequest", "Send a close request to the ticket owner."),
             ("/add",          "Add a user or role to the current ticket."),
             ("/remove",       "Remove a user or role from the current ticket."),
@@ -1085,7 +1298,7 @@ HELP_CATEGORIES = {
     },
     "Moderation Commands": {
         "description": "Commands for moderating server members.",
-        "color": discord.Color.orange(),
+        "color": discord.Color.blue(),
         "fields": [
             ("/punish",       "Apply a punishment (warn/timeout/kick/ban) to a user."),
             ("/unban",        "Unban a user using their Discord ID."),
@@ -1097,7 +1310,7 @@ HELP_CATEGORIES = {
     },
     "Team Commands": {
         "description": "Commands for managing competitive teams.",
-        "color": discord.Color.green(),
+        "color": discord.Color.blue(),
         "fields": [
             ("/create-team",       "Create a new team. *(Admin only)*"),
             ("/manage-team",       "Manage your team roster."),
@@ -1125,7 +1338,7 @@ HELP_CATEGORIES = {
     },
     "General Commands": {
         "description": "Miscellaneous commands available to everyone.",
-        "color": discord.Color.blurple(),
+        "color": discord.Color.blue(),
         "fields": [
             ("/appeal", "Submit a ban appeal (3-month cooldown)."),
             ("/help",   "Show this help menu."),
@@ -1134,7 +1347,7 @@ HELP_CATEGORIES = {
     },
     "AI Commands": {
         "description": "Commands to manage the AI support assistant.",
-        "color": discord.Color.purple(),
+        "color": discord.Color.blue(),
         "fields": [
             ("/aiexample", "Add a Q&A training example. *(AI Admins only)*"),
             ("/ailist",    "View all AI training examples. *(AI Admins only)*"),
@@ -1155,10 +1368,10 @@ class HelpSelect(discord.ui.Select):
         from .bot import LeagueBot
         bot: LeagueBot = interaction.client  # type: ignore[assignment]
         if selected == "Moderation Commands" and not bot.is_staff(interaction):
-            await interaction.response.edit_message(embed=discord.Embed(title="Access Denied", description="Staff only.", color=discord.Color.red()), view=self.view)
+            await interaction.response.edit_message(embed=discord.Embed(title="Access Denied", description="Staff only.", color=discord.Color.blue()), view=self.view)
             return
         if selected == "AI Commands" and not bot.is_ai_admin(interaction):
-            await interaction.response.edit_message(embed=discord.Embed(title="Access Denied", description="You don't have permission to view AI commands.", color=discord.Color.red()), view=self.view)
+            await interaction.response.edit_message(embed=discord.Embed(title="Access Denied", description="You don't have permission to view AI commands.", color=discord.Color.blue()), view=self.view)
             return
         cat = HELP_CATEGORIES[selected]
         embed = discord.Embed(title=selected, description=cat["description"], color=cat["color"])
@@ -1186,8 +1399,6 @@ async def prompt_confirmation(interaction: discord.Interaction, message: str) ->
 # =============================================================================
 
 class _StaffMemberSelect(discord.ui.UserSelect):
-    """A UserSelect for picking a caster or ref."""
-
     def __init__(self, *, placeholder: str, row: int) -> None:
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, row=row)
         self.chosen: Optional[discord.Member] = None
@@ -1212,8 +1423,6 @@ class _StaffMemberSelect(discord.ui.UserSelect):
 
 
 class AssignStaffView(discord.ui.View):
-    """View with two UserSelects (caster + ref) and a Confirm button."""
-
     def __init__(self, *, bot: "LeagueBot", match: "Match", guild: discord.Guild) -> None:
         super().__init__(timeout=180)
         self._bot = bot
@@ -1239,9 +1448,7 @@ class AssignStaffView(discord.ui.View):
         ref: Optional[discord.Member] = self._ref_select.chosen
 
         if not caster and not ref:
-            await interaction.response.send_message(
-                "Please select at least a caster or a referee.", ephemeral=True
-            )
+            await interaction.response.send_message("Please select at least a caster or a referee.", ephemeral=True)
             return
 
         match = self._match
@@ -1271,7 +1478,7 @@ class AssignStaffView(discord.ui.View):
                 for line in lines:
                     if line.startswith("- Caster:") and caster:
                         new_lines.append(f"- Caster: {caster.mention}")
-                    elif line.startswith("- Referee:") and ref:
+                    elif (line.startswith("- Referee:") or line.startswith("- Ref:")) and ref:
                         new_lines.append(f"- Referee: {ref.mention}")
                     else:
                         new_lines.append(line)
@@ -1280,15 +1487,8 @@ class AssignStaffView(discord.ui.View):
                 except discord.HTTPException:
                     pass
 
-        summary_embed = discord.Embed(
-            title="Assignment Confirmed",
-            color=discord.Color.green(),
-        )
-        summary_embed.add_field(
-            name="Match",
-            value=f"{match.team_one} vs {match.team_two}",
-            inline=False,
-        )
+        summary_embed = discord.Embed(title="Assignment Confirmed", color=discord.Color.blue())
+        summary_embed.add_field(name="Match", value=f"{match.team_one} vs {match.team_two}", inline=False)
         if caster:
             summary_embed.add_field(name="Caster", value=caster.mention, inline=True)
         if ref:
